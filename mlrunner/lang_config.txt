@@ -3,7 +3,7 @@
     "name": "lang_app"
   },
   "volume": {
-    "name": "workspace"
+    "name": "lang_vol"
   },
   "image": {
     "base": "lmsysorg/sglang:dev",
@@ -35,20 +35,14 @@
   "storage": {
     "code_sync": {
       "dirs": [
-        "model_stuff",
-        "third_party"
+        "commands"
       ],
       "exclude_files_global": [
         "**/*.pyc"
       ],
-      "exclude_dirs_map": {
-        "model_stuff": [
-          "**/__pycache__/**"
-        ],
-        "third_party": [
-          "**/__pycache__/**"
-        ]
-      }
+      "exclude_dirs_global": [
+        "**/__pycache__/**"
+      ]
     },
     "hf_home": "/workspace/hf",
     "outputs_remote_dir": "/workspace/out_local",

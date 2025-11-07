@@ -6,6 +6,13 @@ runner = MLRunner(
     backend="modal",
     config_path="lang_config.txt",
     gpu={"type": "L4"},
+    storage={
+        "code_sync": {
+            "dirs": ["commands"],
+            "exclude_files_global": ["**/*.pyc"],
+            "exclude_dirs_global": ["**/__pycache__/**"]
+        }
+    }
 )
 
 def run_model():
