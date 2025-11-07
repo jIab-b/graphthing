@@ -1,0 +1,119 @@
+{
+  "app": {
+    "name": "voxels"
+  },
+  "volume": {
+    "name": "workspace"
+  },
+  "image": {
+    "base": "pytorch/pytorch:2.8.0-cuda12.8-cudnn9-devel",
+    "env": {
+      "HF_HOME": "/workspace/hf",
+      "HUGGINGFACE_HUB_CACHE": "/workspace/hf"
+    },
+    "run_commands": [
+      [
+        "apt-get update && apt-get install -y curl ca-certificates gnupg",
+        "curl -fsSL -o /tmp/cuda-keyring.deb https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb",
+        "dpkg -i /tmp/cuda-keyring.deb && rm -f /tmp/cuda-keyring.deb",
+        "apt-get update"
+      ]
+    ],
+    "apt_packages": [
+      "git",
+      "wget",
+      "curl",
+      "build-essential",
+      "ccache",
+      "gdb",
+      "cargo",
+      "rustc",
+      "pkg-config",
+      "cmake",
+      "ninja-build",
+      "libnuma-dev",
+      "rdma-core",
+      "libibverbs-dev",
+      "libgl1-mesa-glx",
+      "libglib2.0-0",
+      "libsm6",
+      "libxext6",
+      "libxrender-dev",
+      "libgomp1"
+    ],
+    "pip_packages": [
+      "uv"
+    ],
+    "uv_pip_packages": [
+      "ninja",
+      "setuptools",
+      "wheel",
+      "numpy",
+      "pybase64",
+      "huggingface_hub",
+      "diffusers",
+      "safetensors",
+      "pillow",
+      "torch",
+      "torchvision",
+      "transformers",
+      "accelerate"
+    ],
+    "post_run_commands": []
+  },
+  "gpu": {
+    "default_type": "L4",
+    "type_aliases": {
+      "L4": "L4",
+      "L40S": "L40S",
+      "A100": "A100-40GB",
+      "H100": "H100"
+    },
+    "modal_object_map": {
+      "L4": "L4",
+      "L40S": "L40S",
+      "A100": "A100",
+      "H100": "H100"
+    }
+  },
+  "build": {
+    "venv": {
+      "path": "/workspace/venv"
+    }
+  },
+  "storage": {
+    "code_sync": {
+      "dirs": [
+        "model_stuff",
+        "third_party"
+      ],
+      "exclude_files_global": [
+        "**/*.pyc"
+      ],
+      "exclude_dirs_map": {
+        "model_stuff": [
+          "**/__pycache__/**"
+        ],
+        "third_party": [
+          "**/__pycache__/**"
+        ]
+      }
+    },
+    "hf_home": "/workspace/hf",
+    "outputs_remote_dir": "/workspace/out_local",
+    "models": [
+      [
+        "stabilityai/stable-diffusion-xl-base-1.0",
+        "sdxl-base"
+      ],
+      [
+        "stabilityai/stable-diffusion-xl-refiner-1.0",
+        "sdxl-refiner"
+      ],
+      [
+        "laion/CLIP-ViT-B-32-laion2B-s34B-b79K",
+        "openclip-vit-b-32"
+      ]
+    ]
+  }
+}

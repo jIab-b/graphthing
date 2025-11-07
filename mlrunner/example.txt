@@ -1,0 +1,64 @@
+from mlrunner import MLRunner
+
+# Explicit config for full control (optional; defaults to task-based)
+config = {
+    "backend": "modal",  # or "aws", "gcp", "azure"; supports "local" for PC-like dev
+    "task": "diffusion",  # Optional: auto-picks; override below for explicit
+    "image": {  # Full image control (Dockerfile-like)
+        "base": "pytorch/pytorch:2.1.0-cuda12.1-cudnn8-devel",  # Pin version
+        "system_libs": ["libblas-dev", "liblapack-dev", "ninja-build"],  # Apt/yum installs
+        "run_commands": ["apt update && apt install -y cmake", "git clone custom-op"],  # Custom setup
+        "conda_env": True,  # Enable conda (install miniconda, create env)
+        "requirements": {  # Pip/conda split
+            "pip": ["torch", "diffusers", "transformers"],
+            "conda": ["cudatoolkit=12.1", "numpy=1.24"]  # For system-heavy deps
+        },
+    },
+    "gpu": {  # Granular GPU control
+        "type": "A100",  # Override task pick (L4/A100/H100/TPU)
+        "count": 2,  # Multi-GPU scale
+        "memory": "40GB",  # Pin variant
+        "env_vars": {"CUDA_VISIBLE_DEVICES": "0,1", "NCCL_SOCKET_IFNAME": "eth0"}  # PC-like tweaks
+    },
+    "build": {  # Compiled/custom code
+        "source_dirs": ["custom_cuda_kernels"],  # Sync + auto-compile
+        "compile_steps": [  # Declarative builds (uses CMake/Ninja from image)
+            {"type": "cmake", "dir": "./kernels", "flags": ["-arch=sm_80", "-O3"]},
+            {"type": "make", "parallel": True},
+            {"type": "python_setup", "ext_modules": ["setup.py build_ext --inplace"]}  # For C++/PyTorch extensions
+        ],
+        "venv": {  # Custom venv control
+            "path": "/workspace/myvenv",  # Persistent across runs
+            "activate_script": "source /workspace/activate_custom.sh"  # User script
+        }
+    },
+    "storage": {  # Explicit I/O (extends your Volumes)
+        "code_sync": {"exclude": ["**/*.pyc"], "dirs": ["src", "data"]},
+        "models": ["stabilityai/stable-diffusion-xl-base-1.0"],  # HF prefetch
+        "persistent_mounts": ["/host_data:/data"]  # PC-like volume mounts
+    },
+    "scale": {  # Convenience scaling
+        "replicas": 4,  # Auto-scale jobs
+        "timeout": 3600,
+        "debug": True  # Enable shell access/logs (e.g., Modal shell)
+    }
+}
+
+# Init with config (merges task defaults if partial)
+runner = MLRunner(config=config)
+
+# Run with explicit options (script/func + advanced I/O)
+result = runner.run(
+    code="my_ml_script.py",  # Or lambda fn: torch.script_module
+    inputs={
+        "args": ["--prompt", "a cat"],
+        "env": {"MY_VAR": "value"},
+        "mounts": [{"local": "./datasets", "remote": "/data/input"}]  # Large data
+    },
+    output_dir="./results",
+    pipeline=[  # Multi-stage for complex workflows
+        {"stage": "train", "script": "train.py"},
+        {"stage": "infer", "script": "infer.py", "depends": "train"}
+    ]
+)
+print(result)  # {"status": "success", "outputs": ["gen_img.png"], "metrics": {"time": 120s, "gpu_util": 0.85}}

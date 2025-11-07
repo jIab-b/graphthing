@@ -1,0 +1,62 @@
+{
+  "app": {
+    "name": "lang_app"
+  },
+  "volume": {
+    "name": "workspace"
+  },
+  "image": {
+    "base": "lmsysorg/sglang:dev",
+    "env": {
+      "HF_HOME": "/workspace/hf",
+      "HUGGINGFACE_HUB_CACHE": "/workspace/hf"
+    }
+  },
+  "gpu": {
+    "default_type": "L4",
+    "type_aliases": {
+      "L4": "L4",
+      "L40S": "L40S",
+      "A100": "A100-40GB",
+      "H100": "H100"
+    },
+    "modal_object_map": {
+      "L4": "L4",
+      "L40S": "L40S",
+      "A100": "A100",
+      "H100": "H100"
+    }
+  },
+  "build": {
+    "venv": {
+      "path": "/workspace/venv"
+    }
+  },
+  "storage": {
+    "code_sync": {
+      "dirs": [
+        "model_stuff",
+        "third_party"
+      ],
+      "exclude_files_global": [
+        "**/*.pyc"
+      ],
+      "exclude_dirs_map": {
+        "model_stuff": [
+          "**/__pycache__/**"
+        ],
+        "third_party": [
+          "**/__pycache__/**"
+        ]
+      }
+    },
+    "hf_home": "/workspace/hf",
+    "outputs_remote_dir": "/workspace/out_local",
+    "models": [
+      [
+        "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B",
+        "DeepSeek-R1-Distill-Qwen-7B"
+      ]
+    ]
+  }
+}
