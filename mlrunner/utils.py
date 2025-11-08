@@ -125,8 +125,11 @@ def prefetch_hf(repos: List, hf_home: str = DEFAULT_HF_HOME) -> str:
         snapshot_download(repo_id=repo_id, local_dir=dest, local_dir_use_symlinks=False)
     return hf_home
 
-def sync_workspace(paths: List[str], exclude_files_global: Optional[List[str]] = None, exclude_dirs_global: Optional[List[str]] = None, exclude_files_map: Optional[Dict[str, List[str]]] = None, exclude_dirs_map: Optional[Dict[str, List[str]]] = None, remote_root: str = DEFAULT_REMOTE_ROOT, upload_func=None) -> None:
+def sync_workspace(paths: List[str], exclude_files_global: Optional[List[str]] = None, exclude_dirs_global: Optional[List[str]] = None, exclude_files_map: Optional[Dict[str, List[str]]] = None, exclude_dirs_map: Optional[Dict[str, List[str]]] = None, remote_root: str = DEFAULT_REMOTE_ROOT, upload_func=None, allowed_extensions: Optional[Sequence[str]] = None) -> None:
     # Backend provides upload_func for remote upload
+    allowed_set = None
+    if allowed_extensions:
+        allowed_set = {ext.lower().lstrip(".") for ext in allowed_extensions}
     for src in paths:
         src_abs = os.path.abspath(src)
         if not os.path.exists(src_abs):
@@ -145,6 +148,10 @@ def sync_workspace(paths: List[str], exclude_files_global: Optional[List[str]] =
         remote_hashes = get_remote_hashes(remote_target)
         files_to_upload: List[Tuple[str, str]] = []
         for rel, h in local_hashes.items():
+            if allowed_set is not None:
+                ext = Path(rel).suffix.lower().lstrip(".")
+                if ext not in allowed_set:
+                    continue
             if rel not in remote_hashes or remote_hashes[rel] != h:
                 local_file = os.path.join(src_abs, rel) if is_dir else src_abs
                 remote_file = os.path.join(base, rel) if is_dir else base

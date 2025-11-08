@@ -10,7 +10,22 @@
     "env": {
       "HF_HOME": "/workspace/hf",
       "HUGGINGFACE_HUB_CACHE": "/workspace/hf"
-    }
+    },
+    "run_commands": [
+      [
+        "apt-get update && apt-get install -y curl ca-certificates gnupg",
+        "curl -fsSL -o /tmp/cuda-keyring.deb https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb",
+        "dpkg -i /tmp/cuda-keyring.deb && rm -f /tmp/cuda-keyring.deb",
+        "apt-get update"
+      ]
+    ],
+    "apt_packages": [
+      "nsight-systems",
+      "nsight-compute"
+    ],
+    "pip_packages": [
+      "nvtx"
+    ]
   },
   "gpu": {
     "default_type": "L4",
@@ -27,11 +42,7 @@
       "H100": "H100"
     }
   },
-  "build": {
-    "venv": {
-      "path": "/workspace/venv"
-    }
-  },
+  "build": {},
   "storage": {
     "code_sync": {
       "dirs": [

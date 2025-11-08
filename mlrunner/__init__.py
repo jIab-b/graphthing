@@ -105,6 +105,29 @@ class MLRunner:
         else:
             sync_outputs(local_dir, remote_dir=remote_dir or f"{DEFAULT_REMOTE_ROOT}/out_local", allowed_extensions=allowed_extensions)
 
+    def push_directory(
+        self,
+        local_dir: str,
+        remote_root: Optional[str] = None,
+        allowed_extensions: Optional[List[str]] = None,
+        exclude_dirs: Optional[List[str]] = None,
+    ) -> None:
+        backend_push = getattr(self.backend_impl, "push_directory", None)
+        if callable(backend_push):
+            backend_push(
+                local_dir=local_dir,
+                remote_root=remote_root,
+                allowed_extensions=allowed_extensions,
+                exclude_dirs=exclude_dirs,
+            )
+        else:
+            sync_workspace(
+                paths=[local_dir],
+                exclude_dirs_global=exclude_dirs,
+                remote_root=remote_root or DEFAULT_REMOTE_ROOT,
+                allowed_extensions=allowed_extensions,
+            )
+
     def shell(
         self,
         config: Optional[str] = None,
@@ -220,3 +243,18 @@ class LocalBackend:
 
     def close(self):
         return None
+
+    def push_directory(
+        self,
+        local_dir: str,
+        remote_root: Optional[str] = None,
+        allowed_extensions: Optional[List[str]] = None,
+        exclude_dirs: Optional[List[str]] = None,
+    ) -> None:
+        target_remote = remote_root or DEFAULT_REMOTE_ROOT
+        sync_workspace(
+            paths=[local_dir],
+            exclude_dirs_global=exclude_dirs,
+            remote_root=target_remote,
+            allowed_extensions=allowed_extensions,
+        )

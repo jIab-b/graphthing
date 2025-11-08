@@ -314,6 +314,22 @@ class ModalBackend:
         finally:
             globals()["_gpu"] = previous
 
+    def push_directory(
+        self,
+        local_dir: str,
+        remote_root: Optional[str] = None,
+        allowed_extensions: Optional[List[str]] = None,
+        exclude_dirs: Optional[List[str]] = None,
+    ) -> None:
+        remote = self._normalize_remote_path(remote_root)
+        sync_workspace(
+            paths=[local_dir],
+            exclude_dirs_global=exclude_dirs,
+            remote_root=remote,
+            upload_func=self._upload_to_volume,
+            allowed_extensions=allowed_extensions,
+        )
+
 
 class ModalShellSession:
     def __init__(self, backend: ModalBackend, workdir: str, env: Dict[str, str], gpu_spec: Any):
