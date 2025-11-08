@@ -23,8 +23,11 @@
       "nsight-systems",
       "nsight-compute"
     ],
-    "pip_packages": [
-      "nvtx"
+    "pip_packages": [],
+    "uv_pip_packages": [
+      "nvtx",
+      "vllm",
+      "pydot"
     ]
   },
   "gpu": {

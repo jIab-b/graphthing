@@ -1,7 +1,16 @@
 import os
+import shutil
+import sys
 from concurrent.futures import ThreadPoolExecutor
 import sglang as sgl
 import torch
+
+MODEL_ID = os.environ.get("GRAPH_MODEL_ID", "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B")
+
+def _reset_directory(path):
+    if os.path.isdir(path):
+        shutil.rmtree(path)
+    os.makedirs(path, exist_ok=True)
 
 @sgl.function
 def gen_json(s, text, max_tokens, temperature):
@@ -17,9 +26,13 @@ def run_scenario(prompt_len, concurrency, max_tokens):
         list(ex.map(lambda t: gen_json.run(t, max_tokens, 0.6), texts))
 
 if __name__ == "__main__":
-    os.makedirs("out_local", exist_ok=True)
-    model_path = "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B"
-    sgl.set_default_backend(sgl.Runtime(model_path=model_path))
+    _reset_directory("out_local")
+    try:
+        runtime = sgl.Runtime(model_path=MODEL_ID)
+    except Exception as exc:  # pragma: no cover - runtime optional
+        print(f"Skipping profile_sequence: failed to start runtime ({exc}).")
+        sys.exit(0)
+    sgl.set_default_backend(runtime)
     torch.cuda.nvtx.range_push("warmup")
     gen_json.run(text_of_len(64), 8, 0.6)
     torch.cuda.nvtx.range_pop()
@@ -30,5 +43,3 @@ if __name__ == "__main__":
         run_scenario(prompt_len, concurrency, max_tokens)
         torch.cuda.nvtx.range_pop()
     torch.cuda.nvtx.range_pop()
-
-

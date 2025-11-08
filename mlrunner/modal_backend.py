@@ -488,7 +488,7 @@ def _filter_local_extensions(base_path: Path, allowed_extensions: Sequence[str])
             except StopIteration:
                 dir_path.rmdir()
 
-@app_proxy.function(image=DEFER_IMAGE, volumes={DEFAULT_REMOTE_ROOT: DEFER_VOLUME})
+@app_proxy.function(image=DEFER_IMAGE, volumes={DEFAULT_REMOTE_ROOT: DEFER_VOLUME}, timeout=3600)
 def get_remote_hashes_remote(remote_path: str) -> Dict[str, str]:
     if not os.path.exists(remote_path):
         return {}
@@ -502,7 +502,7 @@ def get_remote_hashes_remote(remote_path: str) -> Dict[str, str]:
             out[rel] = _hash_file_local(p)
     return out
 
-@app_proxy.function(image=DEFER_IMAGE, volumes={DEFAULT_REMOTE_ROOT: DEFER_VOLUME})
+@app_proxy.function(image=DEFER_IMAGE, volumes={DEFAULT_REMOTE_ROOT: DEFER_VOLUME}, timeout=3600)
 def zip_remote_dir_remote(remote_dir: str) -> Optional[bytes]:
     if not os.path.exists(remote_dir):
         return None
