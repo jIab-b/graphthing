@@ -138,6 +138,7 @@ class MLRunner:
         sync_code: Optional[bool] = None,
         prefetch_models: Optional[bool] = None,
         interactive: Optional[bool] = None,
+        stream: Optional[bool] = True,
     ):
         call_config = deepcopy(self.config)
         if config:
@@ -153,6 +154,7 @@ class MLRunner:
         effective_sync_code = sync_code if sync_code is not None else shell_cfg.get("sync_code", True)
         effective_prefetch = prefetch_models if prefetch_models is not None else shell_cfg.get("prefetch_models", False)
         effective_interactive = interactive if interactive is not None else shell_cfg.get("interactive", True)
+        effective_stream = stream if stream is not None else shell_cfg.get("stream", True)
         options = ShellOptions(
             workdir=workdir,
             env=merged_env,
@@ -162,6 +164,7 @@ class MLRunner:
             prefetch_models=bool(effective_prefetch),
             config_path=call_config.get("config_path"),
             interactive=bool(effective_interactive),
+            stream=bool(effective_stream),
         )
         backend = self.backend_impl
         temp_backend = None

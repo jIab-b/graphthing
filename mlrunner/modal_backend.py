@@ -230,7 +230,7 @@ class ModalBackend:
                     prefetch_kwargs["hf_home"] = hf_home
                 prefetch_hf_remote.remote(**prefetch_kwargs)
         gpu_spec = self._select_gpu_decorator(options.gpu)
-        session = ModalShellSession(self, workdir, options.env, gpu_spec)
+        session = ModalShellSession(self, workdir, options.env, gpu_spec, stream=options.stream)
         exit_code = 0
         if options.startup_cmd:
             exit_code = session.run_command(options.startup_cmd)
@@ -332,12 +332,13 @@ class ModalBackend:
 
 
 class ModalShellSession:
-    def __init__(self, backend: ModalBackend, workdir: str, env: Dict[str, str], gpu_spec: Any):
+    def __init__(self, backend: ModalBackend, workdir: str, env: Dict[str, str], gpu_spec: Any, stream: bool = True):
         self.backend = backend
         self.base_dir = backend._normalize_remote_path(workdir)
         self.workdir = self.base_dir
         self.env = {str(k): str(v) for k, v in (env or {}).items()}
         self.gpu_spec = gpu_spec
+        self.stream = bool(stream)
         self.output = sys.stdout
         self.last_exit_code = 0
 
@@ -364,24 +365,54 @@ class ModalShellSession:
     def run_command(self, command: str) -> int:
         if not command.strip():
             return self.last_exit_code
-        with self.backend._gpu_context(self.gpu_spec):
-            result = execute_shell_command_remote.remote(
-                command=command,
-                workdir=self.workdir,
-                env=self.env,
-            )
         logs = ""
         exit_code = 0
-        if isinstance(result, dict):
-            logs = result.get("logs", "") or ""
-            exit_code = int(result.get("returncode", 0))
+        if self.stream:
+            with self.backend._gpu_context(self.gpu_spec):
+                stream = execute_shell_command_remote.remote_gen(
+                    command=command,
+                    workdir=self.workdir,
+                    env=self.env,
+                )
+            try:
+                result_info = None
+                for event in stream:
+                    if isinstance(event, dict):
+                        kind = event.get("event")
+                        if kind == "log":
+                            message = event.get("data", "")
+                            if message:
+                                self.output.write(message)
+                                if not message.endswith("\n"):
+                                    self.output.write("\n")
+                                self.output.flush()
+                        elif kind == "result":
+                            result_info = event
+                    else:
+                        self.output.write(str(event))
+                if result_info:
+                    logs = result_info.get("logs", "") or ""
+                    exit_code = int(result_info.get("returncode", 0))
+            finally:
+                if hasattr(stream, "close"):
+                    stream.close()
         else:
-            logs = str(result or "")
-        if logs:
-            self.output.write(logs)
-            if not logs.endswith("\n"):
-                self.output.write("\n")
-            self.output.flush()
+            with self.backend._gpu_context(self.gpu_spec):
+                result = execute_shell_command_remote.remote(
+                    command=command,
+                    workdir=self.workdir,
+                    env=self.env,
+                )
+            if isinstance(result, dict):
+                logs = result.get("logs", "") or ""
+                exit_code = int(result.get("returncode", 0))
+            else:
+                logs = str(result or "")
+            if logs:
+                self.output.write(logs)
+                if not logs.endswith("\n"):
+                    self.output.write("\n")
+                self.output.flush()
         self.last_exit_code = exit_code
         return exit_code
 
@@ -556,17 +587,31 @@ def execute_shell_command_remote(command: str, workdir: str, env: Optional[Dict[
     os.chdir(workdir)
     if env:
         os.environ.update({str(k): str(v) for k, v in env.items()})
-    completed = subprocess.run(
+    proc = subprocess.Popen(
         command,
         shell=True,
         executable="/bin/bash",
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
         text=True,
+        bufsize=1,
     )
-    stdout = completed.stdout or ""
-    stderr = completed.stderr or ""
-    logs = stdout + stderr
-    return {"returncode": int(completed.returncode), "logs": logs}
+    logs: List[str] = []
+    try:
+        if proc.stdout:
+            for line in proc.stdout:
+                logs.append(line)
+                yield {"event": "log", "data": line}
+        returncode = proc.wait()
+    finally:
+        if proc.stdout:
+            proc.stdout.close()
+    yield {
+        "event": "result",
+        "returncode": int(returncode),
+        "workdir": workdir,
+        "logs": "".join(logs),
+    }
 
 @app_proxy.function(image=DEFER_IMAGE, volumes={DEFAULT_REMOTE_ROOT: DEFER_VOLUME})
 def prefetch_hf_remote(repos: List, hf_home: str = DEFAULT_HF_HOME) -> str:

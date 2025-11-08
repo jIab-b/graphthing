@@ -12,4 +12,5 @@ class ShellOptions:
     prefetch_models: bool
     config_path: Optional[str]
     interactive: bool
+    stream: bool
 

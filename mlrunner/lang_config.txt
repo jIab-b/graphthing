@@ -21,7 +21,8 @@
     ],
     "apt_packages": [
       "nsight-systems",
-      "nsight-compute"
+      "nsight-compute",
+      "graphviz"
     ],
     "pip_packages": [],
     "uv_pip_packages": [
