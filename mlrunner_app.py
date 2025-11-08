@@ -19,8 +19,36 @@ runner = MLRunner(
 )
 
 def run_model():
-    # Run commands in sequence within a single execution context
     runner.run(code="commands/run_sequence.py", output_dir="./out_local")
 
+
+def sync_sglang_sources():
+    allowed_extensions = [
+        "py",
+        "pyi",
+        "md",
+        "txt",
+        "json",
+        "yaml",
+        "yml",
+        "sh",
+        "cmake",
+        "hpp",
+        "h",
+        "c",
+        "cc",
+        "cpp",
+        "cu",
+        "ptx",
+        "js",
+        "ts",
+    ]
+    runner.sync_outputs(
+        local_dir="sglang",
+        remote_dir="/sgl-workspace/sglang",
+        allowed_extensions=allowed_extensions,
+    )
+
 if __name__ == "__main__":
-    run_model()
+    #run_model()
+    sync_sglang_sources()

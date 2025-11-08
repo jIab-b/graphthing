@@ -6,7 +6,7 @@ import shutil
 import hashlib
 import fnmatch
 from pathlib import Path
-from typing import Optional, List, Dict, Tuple, Iterable
+from typing import Optional, List, Dict, Tuple, Iterable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 
 DEFAULT_REMOTE_ROOT = os.environ.get("REMOTE_ROOT", "/workspace")
@@ -158,7 +158,7 @@ def sync_workspace(paths: List[str], exclude_files_global: Optional[List[str]] =
                 os.makedirs(os.path.dirname(target_path), exist_ok=True)
                 shutil.copy2(local_file, target_path)
 
-def sync_outputs(local_dir: str, remote_dir: str = f"{DEFAULT_REMOTE_ROOT}/out_local") -> None:
+def sync_outputs(local_dir: str, remote_dir: str = f"{DEFAULT_REMOTE_ROOT}/out_local", allowed_extensions: Optional[Sequence[str]] = None) -> None:
     local_path = Path(local_dir).expanduser().resolve()
     remote_hashes = get_remote_hashes(remote_dir)
     if not remote_hashes:
@@ -175,3 +175,16 @@ def sync_outputs(local_dir: str, remote_dir: str = f"{DEFAULT_REMOTE_ROOT}/out_l
     local_path.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
         zf.extractall(local_path)
+    if allowed_extensions:
+        allowed = {ext.lower().lstrip(".") for ext in allowed_extensions}
+        for file_path in local_path.rglob("*"):
+            if file_path.is_file():
+                ext = file_path.suffix.lower().lstrip(".")
+                if ext not in allowed:
+                    file_path.unlink()
+        for dir_path in sorted(local_path.rglob("*"), reverse=True):
+            if dir_path.is_dir():
+                try:
+                    next(dir_path.iterdir())
+                except StopIteration:
+                    dir_path.rmdir()

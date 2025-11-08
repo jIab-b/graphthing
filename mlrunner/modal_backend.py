@@ -3,16 +3,21 @@ import hashlib
 import io
 import json
 import os
+import posixpath
+import shlex
+import sys
 import shutil
 import subprocess
 import zipfile
+from contextlib import contextmanager
 from copy import deepcopy
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 import modal
-from modal import Image, Volume, gpu as modal_gpu
+from modal import Image, Volume
 
+from mlrunner.shell_options import ShellOptions
 from mlrunner.utils import *
 
 CONFIG_FILENAME = "modal_config.txt"
@@ -144,14 +149,9 @@ class ModalBackend:
         resolved_label = alias_map.get(requested, requested)
         spec_map = {k.upper(): v for k, v in gpu_config.get("modal_object_map", {}).items()}
         spec_value = spec_map.get(requested) or spec_map.get(resolved_label.upper()) or resolved_label
-        return {"type": requested, "label": resolved_label, "decorator": spec_value}
+        return {"type": requested, "label": resolved_label, "decorator": str(spec_value).upper()}
 
     def run(self, code, inputs, output_dir):
-        # Sync workspace using modal volume
-        def upload_to_volume(local_file, remote_file):
-            subprocess.run(["modal", "volume", "rm", self.volume.name, remote_file], check=False)
-            subprocess.run(["modal", "volume", "put", self.volume.name, local_file, remote_file], check=True)
-        
         code_sync = self.config.get("storage", {}).get("code_sync", {})
         sync_workspace(
             paths=code_sync.get("dirs") or [],
@@ -159,7 +159,7 @@ class ModalBackend:
             exclude_dirs_global=code_sync.get("exclude_dirs_global"),
             exclude_files_map=code_sync.get("exclude_files_map"),
             exclude_dirs_map=code_sync.get("exclude_dirs_map"),
-            upload_func=upload_to_volume
+            upload_func=self._upload_to_volume,
         )
 
         # Prefetch models remotely
@@ -208,7 +208,41 @@ class ModalBackend:
         self.sync_outputs(local_dir=output_dir)
         return {"status": "success", "result": result_info}
 
-    def sync_outputs(self, local_dir: str, remote_dir: Optional[str] = None) -> None:
+    def shell(self, options: ShellOptions):
+        workdir = self._normalize_remote_path(options.workdir)
+        if options.sync_code:
+            code_sync = self.config.get("storage", {}).get("code_sync", {})
+            sync_workspace(
+                paths=code_sync.get("dirs") or [],
+                exclude_files_global=code_sync.get("exclude_files_global"),
+                exclude_dirs_global=code_sync.get("exclude_dirs_global"),
+                exclude_files_map=code_sync.get("exclude_files_map"),
+                exclude_dirs_map=code_sync.get("exclude_dirs_map"),
+                upload_func=self._upload_to_volume,
+            )
+        if options.prefetch_models:
+            storage_cfg = self.config.get("storage", {})
+            repos = storage_cfg.get("models", [])
+            if repos:
+                prefetch_kwargs: Dict[str, Any] = {"repos": repos}
+                hf_home = storage_cfg.get("hf_home")
+                if hf_home:
+                    prefetch_kwargs["hf_home"] = hf_home
+                prefetch_hf_remote.remote(**prefetch_kwargs)
+        gpu_spec = self._select_gpu_decorator(options.gpu)
+        session = ModalShellSession(self, workdir, options.env, gpu_spec)
+        exit_code = 0
+        if options.startup_cmd:
+            exit_code = session.run_command(options.startup_cmd)
+            if not options.interactive:
+                return exit_code
+            if exit_code:
+                return exit_code
+        if not options.interactive:
+            return exit_code
+        return session.interactive()
+
+    def sync_outputs(self, local_dir: str, remote_dir: Optional[str] = None, allowed_extensions: Optional[List[str]] = None) -> None:
         target_remote = remote_dir or self.remote_outputs
         local_path = Path(local_dir).expanduser().resolve()
         remote_hashes = get_remote_hashes_remote.remote(target_remote)
@@ -216,6 +250,8 @@ class ModalBackend:
             if local_path.exists():
                 shutil.rmtree(local_path)
             local_path.mkdir(parents=True, exist_ok=True)
+            if allowed_extensions:
+                _filter_local_extensions(local_path, allowed_extensions)
             return
         zip_bytes = zip_remote_dir_remote.remote(target_remote)
         if not zip_bytes:
@@ -225,6 +261,8 @@ class ModalBackend:
         local_path.mkdir(parents=True, exist_ok=True)
         with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
             zf.extractall(local_path)
+        if allowed_extensions:
+            _filter_local_extensions(local_path, allowed_extensions)
 
     def _cleanup_app(self) -> None:
         ctx = getattr(self, "_app_ctx", None)
@@ -234,6 +272,136 @@ class ModalBackend:
             except Exception:
                 pass
             self._app_ctx = None
+
+    def _upload_to_volume(self, local_file: str, remote_file: str):
+        subprocess.run(["modal", "volume", "rm", self.volume.name, remote_file], check=False)
+        subprocess.run(["modal", "volume", "put", self.volume.name, local_file, remote_file], check=True)
+
+    def _select_gpu_decorator(self, override: Optional[Any]) -> Any:
+        if override is None:
+            return self.gpu_info["decorator"]
+        if isinstance(override, bool):
+            return self.gpu_info["decorator"] if override else None
+        gpu_config = self.config.get("gpu", {})
+        requested = str(override).upper()
+        alias_map = {k.upper(): v for k, v in gpu_config.get("type_aliases", {}).items()}
+        resolved = alias_map.get(requested, requested)
+        spec_map = {k.upper(): v for k, v in gpu_config.get("modal_object_map", {}).items()}
+        spec_value = spec_map.get(requested) or spec_map.get(resolved.upper()) or spec_map.get(resolved) or resolved
+        return str(spec_value).upper()
+
+    def close(self):
+        self._cleanup_app()
+
+    def _normalize_remote_path(self, path: Optional[str]) -> str:
+        base = path or DEFAULT_REMOTE_ROOT
+        if not base:
+            base = DEFAULT_REMOTE_ROOT
+        candidate = str(base)
+        if not candidate.startswith("/"):
+            candidate = posixpath.join(DEFAULT_REMOTE_ROOT, candidate)
+        normalized = posixpath.normpath(candidate)
+        if not normalized.startswith("/"):
+            normalized = "/" + normalized
+        return normalized
+
+    @contextmanager
+    def _gpu_context(self, spec: Any):
+        previous = globals().get("_gpu")
+        globals()["_gpu"] = spec
+        try:
+            yield
+        finally:
+            globals()["_gpu"] = previous
+
+
+class ModalShellSession:
+    def __init__(self, backend: ModalBackend, workdir: str, env: Dict[str, str], gpu_spec: Any):
+        self.backend = backend
+        self.base_dir = backend._normalize_remote_path(workdir)
+        self.workdir = self.base_dir
+        self.env = {str(k): str(v) for k, v in (env or {}).items()}
+        self.gpu_spec = gpu_spec
+        self.output = sys.stdout
+        self.last_exit_code = 0
+
+    def interactive(self) -> int:
+        inp = sys.stdin
+        out = self.output
+        while True:
+            if hasattr(inp, "isatty") and inp.isatty():
+                out.write(self._prompt())
+                out.flush()
+            line = inp.readline()
+            if line == "":
+                if hasattr(inp, "isatty") and inp.isatty():
+                    out.write("\n")
+                    out.flush()
+                return self.last_exit_code
+            command = line.rstrip("\n")
+            if not command.strip():
+                continue
+            result = self._handle_command(command)
+            if result is False:
+                return self.last_exit_code
+
+    def run_command(self, command: str) -> int:
+        if not command.strip():
+            return self.last_exit_code
+        with self.backend._gpu_context(self.gpu_spec):
+            result = execute_shell_command_remote.remote(
+                command=command,
+                workdir=self.workdir,
+                env=self.env,
+            )
+        logs = ""
+        exit_code = 0
+        if isinstance(result, dict):
+            logs = result.get("logs", "") or ""
+            exit_code = int(result.get("returncode", 0))
+        else:
+            logs = str(result or "")
+        if logs:
+            self.output.write(logs)
+            if not logs.endswith("\n"):
+                self.output.write("\n")
+            self.output.flush()
+        self.last_exit_code = exit_code
+        return exit_code
+
+    def _handle_command(self, command: str):
+        parts = shlex.split(command)
+        if not parts:
+            return None
+        head = parts[0]
+        if head in ("exit", "quit"):
+            return False
+        if head == "cd":
+            target = parts[1] if len(parts) > 1 else None
+            self._change_directory(target)
+            return None
+        self.last_exit_code = self.run_command(command)
+        return None
+
+    def _change_directory(self, target: Optional[str]):
+        if target is None or target == "~":
+            self.workdir = self.base_dir
+            return
+        candidate = target
+        if candidate.startswith("~"):
+            suffix = candidate[1:].lstrip("/")
+            candidate = posixpath.join(self.base_dir, suffix)
+        if candidate.startswith("/"):
+            new_path = candidate
+        else:
+            new_path = posixpath.join(self.workdir, candidate)
+        normalized = posixpath.normpath(new_path)
+        if not normalized.startswith("/"):
+            normalized = "/" + normalized
+        self.workdir = normalized
+
+    def _prompt(self) -> str:
+        return f"{self.workdir}$ "
 
 # Modal-specific functions (adapted from modal_utils)
 class _Defer:
@@ -289,6 +457,20 @@ _gpu = None
 DEFER_IMAGE = _Defer("_image")
 DEFER_VOLUME = _Defer("_vol")
 DEFER_GPU = _Defer("_gpu")
+
+def _filter_local_extensions(base_path: Path, allowed_extensions: Sequence[str]) -> None:
+    allowed = {ext.lower().lstrip(".") for ext in allowed_extensions}
+    for file_path in base_path.rglob("*"):
+        if file_path.is_file():
+            ext = file_path.suffix.lower().lstrip(".")
+            if ext not in allowed:
+                file_path.unlink()
+    for dir_path in sorted(base_path.rglob("*"), reverse=True):
+        if dir_path.is_dir():
+            try:
+                next(dir_path.iterdir())
+            except StopIteration:
+                dir_path.rmdir()
 
 @app_proxy.function(image=DEFER_IMAGE, volumes={DEFAULT_REMOTE_ROOT: DEFER_VOLUME})
 def get_remote_hashes_remote(remote_path: str) -> Dict[str, str]:
@@ -351,6 +533,24 @@ def run_script_remote(script_path: str, venv: Optional[str] = None, workdir: str
         "workdir": workdir,
         "logs": "".join(logs),
     }
+
+@app_proxy.function(image=DEFER_IMAGE, volumes={DEFAULT_REMOTE_ROOT: DEFER_VOLUME}, gpu=DEFER_GPU, timeout=86400)
+def execute_shell_command_remote(command: str, workdir: str, env: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+    os.makedirs(workdir, exist_ok=True)
+    os.chdir(workdir)
+    if env:
+        os.environ.update({str(k): str(v) for k, v in env.items()})
+    completed = subprocess.run(
+        command,
+        shell=True,
+        executable="/bin/bash",
+        capture_output=True,
+        text=True,
+    )
+    stdout = completed.stdout or ""
+    stderr = completed.stderr or ""
+    logs = stdout + stderr
+    return {"returncode": int(completed.returncode), "logs": logs}
 
 @app_proxy.function(image=DEFER_IMAGE, volumes={DEFAULT_REMOTE_ROOT: DEFER_VOLUME})
 def prefetch_hf_remote(repos: List, hf_home: str = DEFAULT_HF_HOME) -> str:
