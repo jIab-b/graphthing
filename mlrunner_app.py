@@ -109,6 +109,7 @@ def push_commands():
     )
 
 def run_full_capture():
+    runner.run(code="commands/export_model_graphs.py", output_dir="./out_local")
     runner.run(code="commands/trace_with_nsight.py", output_dir="./out_local")
     allowed_extensions = [
         "json",

@@ -28,7 +28,8 @@
     "uv_pip_packages": [
       "nvtx",
       "vllm",
-      "pydot"
+      "pydot",
+      "accelerate"
     ]
   },
   "gpu": {

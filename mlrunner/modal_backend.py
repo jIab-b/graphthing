@@ -245,7 +245,7 @@ class ModalBackend:
     def sync_outputs(self, local_dir: str, remote_dir: Optional[str] = None, allowed_extensions: Optional[List[str]] = None) -> None:
         target_remote = remote_dir or self.remote_outputs
         local_path = Path(local_dir).expanduser().resolve()
-        remote_hashes = get_remote_hashes_remote.remote(target_remote)
+        remote_hashes = get_remote_hashes_remote.remote(target_remote, allowed_extensions=allowed_extensions)
         if not remote_hashes:
             if local_path.exists():
                 shutil.rmtree(local_path)
@@ -253,7 +253,7 @@ class ModalBackend:
             if allowed_extensions:
                 _filter_local_extensions(local_path, allowed_extensions)
             return
-        zip_bytes = zip_remote_dir_remote.remote(target_remote)
+        zip_bytes = zip_remote_dir_remote.remote(target_remote, allowed_extensions=allowed_extensions)
         if not zip_bytes:
             return
         if local_path.exists():
@@ -520,27 +520,41 @@ def _filter_local_extensions(base_path: Path, allowed_extensions: Sequence[str])
                 dir_path.rmdir()
 
 @app_proxy.function(image=DEFER_IMAGE, volumes={DEFAULT_REMOTE_ROOT: DEFER_VOLUME}, timeout=3600)
-def get_remote_hashes_remote(remote_path: str) -> Dict[str, str]:
+def get_remote_hashes_remote(remote_path: str, allowed_extensions: Optional[List[str]] = None) -> Dict[str, str]:
     if not os.path.exists(remote_path):
         return {}
     if os.path.isfile(remote_path):
         return {os.path.basename(remote_path): _hash_file_local(remote_path)}
     out: Dict[str, str] = {}
+    allow: Optional[set] = None
+    if allowed_extensions:
+        allow = {ext.lower().lstrip(".") for ext in allowed_extensions}
     for root, _, files in os.walk(remote_path):
         for name in files:
+            if allow is not None:
+                ext = os.path.splitext(name)[1].lower().lstrip(".")
+                if ext not in allow:
+                    continue
             p = os.path.join(root, name)
             rel = os.path.relpath(p, remote_path).replace("\\", "/")
             out[rel] = _hash_file_local(p)
     return out
 
 @app_proxy.function(image=DEFER_IMAGE, volumes={DEFAULT_REMOTE_ROOT: DEFER_VOLUME}, timeout=3600)
-def zip_remote_dir_remote(remote_dir: str) -> Optional[bytes]:
+def zip_remote_dir_remote(remote_dir: str, allowed_extensions: Optional[List[str]] = None) -> Optional[bytes]:
     if not os.path.exists(remote_dir):
         return None
+    allow: Optional[set] = None
+    if allowed_extensions:
+        allow = {ext.lower().lstrip(".") for ext in allowed_extensions}
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
         for root, _, files in os.walk(remote_dir):
             for name in files:
+                if allow is not None:
+                    ext = os.path.splitext(name)[1].lower().lstrip(".")
+                    if ext not in allow:
+                        continue
                 p = os.path.join(root, name)
                 arc = os.path.relpath(p, remote_dir)
                 zf.write(p, arc)
