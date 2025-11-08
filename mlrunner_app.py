@@ -133,4 +133,5 @@ if __name__ == "__main__":
     #run_model()
     #push_commands()
     #sync_sglang_sources()
+    push_commands()
     run_full_capture()

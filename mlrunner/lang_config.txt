@@ -42,7 +42,11 @@
       "H100": "H100"
     }
   },
-  "build": {},
+  "build": {
+    "venv": {
+      "path": null
+    }
+  },
   "storage": {
     "code_sync": {
       "dirs": [
