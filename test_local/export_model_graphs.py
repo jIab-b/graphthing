@@ -346,14 +346,14 @@ if __name__ == "__main__":
     print("STEP 2: resolving config from local dir")
     cfg = AutoConfig.from_pretrained(LOCAL_DIR, trust_remote_code=True)
     print(f"CONFIG: loaded; layers={getattr(cfg,'num_hidden_layers',None)} heads={getattr(cfg,'num_attention_heads',None)} hidden={getattr(cfg,'hidden_size',None)}")
-    print("STEP 3: loading model weights on CPU from local dir (single GPU move after)")
+    print("STEP 3: loading model weights on CPU from local dir {LOCAL_DIR}, (single GPU move after)")
     t_load = time.time()
     model = AutoModelForCausalLM.from_pretrained(
         LOCAL_DIR,
         torch_dtype="auto",
         low_cpu_mem_usage=False,
         trust_remote_code=True,
-        attn_implementation="sdpa",
+        attn_implementation="eager",
     )
     print(f"LOAD: from_pretrained completed in {time.time() - t_load:.2f}s (CPU)")
     if torch.cuda.is_available():

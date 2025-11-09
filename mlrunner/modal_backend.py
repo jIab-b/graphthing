@@ -153,6 +153,10 @@ class ModalBackend:
 
     def run(self, code, inputs, output_dir):
         code_sync = self.config.get("storage", {}).get("code_sync", {})
+        # Use remote hash checking for incremental sync
+        allowed_exts = None  # For code sync, allow all extensions
+        def get_remote_hashes_func(path: str):
+            return get_remote_hashes_remote.remote(path, allowed_extensions=allowed_exts)
         sync_workspace(
             paths=code_sync.get("dirs") or [],
             exclude_files_global=code_sync.get("exclude_files_global"),
@@ -160,6 +164,7 @@ class ModalBackend:
             exclude_files_map=code_sync.get("exclude_files_map"),
             exclude_dirs_map=code_sync.get("exclude_dirs_map"),
             upload_func=self._upload_to_volume,
+            get_remote_hashes_func=get_remote_hashes_func,
         )
 
         # Prefetch models remotely
@@ -212,6 +217,9 @@ class ModalBackend:
         workdir = self._normalize_remote_path(options.workdir)
         if options.sync_code:
             code_sync = self.config.get("storage", {}).get("code_sync", {})
+            # Use remote hash checking for incremental sync
+            def get_remote_hashes_func(path: str):
+                return get_remote_hashes_remote.remote(path, allowed_extensions=None)
             sync_workspace(
                 paths=code_sync.get("dirs") or [],
                 exclude_files_global=code_sync.get("exclude_files_global"),
@@ -219,6 +227,7 @@ class ModalBackend:
                 exclude_files_map=code_sync.get("exclude_files_map"),
                 exclude_dirs_map=code_sync.get("exclude_dirs_map"),
                 upload_func=self._upload_to_volume,
+                get_remote_hashes_func=get_remote_hashes_func,
             )
         if options.prefetch_models:
             storage_cfg = self.config.get("storage", {})
@@ -245,24 +254,15 @@ class ModalBackend:
     def sync_outputs(self, local_dir: str, remote_dir: Optional[str] = None, allowed_extensions: Optional[List[str]] = None) -> None:
         target_remote = remote_dir or self.remote_outputs
         local_path = Path(local_dir).expanduser().resolve()
-        remote_hashes = get_remote_hashes_remote.remote(target_remote, allowed_extensions=allowed_extensions)
-        if not remote_hashes:
-            if local_path.exists():
-                shutil.rmtree(local_path)
-            local_path.mkdir(parents=True, exist_ok=True)
-            if allowed_extensions:
-                _filter_local_extensions(local_path, allowed_extensions)
-            return
         zip_bytes = zip_remote_dir_remote.remote(target_remote, allowed_extensions=allowed_extensions)
         if not zip_bytes:
             return
-        if local_path.exists():
-            shutil.rmtree(local_path)
         local_path.mkdir(parents=True, exist_ok=True)
         with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
             zf.extractall(local_path)
         if allowed_extensions:
             _filter_local_extensions(local_path, allowed_extensions)
+        clear_remote_outputs_remote.remote(target_remote, allowed_extensions=allowed_extensions)
 
     def _cleanup_app(self) -> None:
         ctx = getattr(self, "_app_ctx", None)
@@ -322,12 +322,16 @@ class ModalBackend:
         exclude_dirs: Optional[List[str]] = None,
     ) -> None:
         remote = self._normalize_remote_path(remote_root)
+        # Use remote hash checking for proper incremental sync
+        def get_remote_hashes_func(path: str):
+            return get_remote_hashes_remote.remote(path, allowed_extensions=allowed_extensions)
         sync_workspace(
             paths=[local_dir],
             exclude_dirs_global=exclude_dirs,
             remote_root=remote,
             upload_func=self._upload_to_volume,
             allowed_extensions=allowed_extensions,
+            get_remote_hashes_func=get_remote_hashes_func,
         )
 
 
@@ -646,6 +650,30 @@ def prefetch_hf_remote(repos: List, hf_home: str = DEFAULT_HF_HOME) -> str:
         _P(dest).mkdir(parents=True, exist_ok=True)
         snapshot_download(repo_id=repo_id, local_dir=dest, local_dir_use_symlinks=False)
     return hf_home
+
+@app_proxy.function(image=DEFER_IMAGE, volumes={DEFAULT_REMOTE_ROOT: DEFER_VOLUME}, timeout=3600)
+def clear_remote_outputs_remote(remote_dir: str, allowed_extensions: Optional[List[str]] = None) -> None:
+    if not os.path.exists(remote_dir):
+        return
+    allow: Optional[set] = None
+    if allowed_extensions:
+        allow = {ext.lower().lstrip('.') for ext in allowed_extensions}
+    for root, dirs, files in os.walk(remote_dir, topdown=False):
+        for name in files:
+            if allow is not None:
+                ext = os.path.splitext(name)[1].lower().lstrip('.')
+                if ext not in allow:
+                    continue
+            try:
+                os.remove(os.path.join(root, name))
+            except FileNotFoundError:
+                pass
+        for name in dirs:
+            try:
+                os.rmdir(os.path.join(root, name))
+            except (FileNotFoundError, OSError):
+                pass
+
 def _hash_file_local(path: str, chunk_size: int = 1024 * 1024) -> str:
     h = hashlib.sha256()
     with open(path, "rb") as f:

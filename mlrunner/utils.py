@@ -125,7 +125,7 @@ def prefetch_hf(repos: List, hf_home: str = DEFAULT_HF_HOME) -> str:
         snapshot_download(repo_id=repo_id, local_dir=dest, local_dir_use_symlinks=False)
     return hf_home
 
-def sync_workspace(paths: List[str], exclude_files_global: Optional[List[str]] = None, exclude_dirs_global: Optional[List[str]] = None, exclude_files_map: Optional[Dict[str, List[str]]] = None, exclude_dirs_map: Optional[Dict[str, List[str]]] = None, remote_root: str = DEFAULT_REMOTE_ROOT, upload_func=None, allowed_extensions: Optional[Sequence[str]] = None) -> None:
+def sync_workspace(paths: List[str], exclude_files_global: Optional[List[str]] = None, exclude_dirs_global: Optional[List[str]] = None, exclude_files_map: Optional[Dict[str, List[str]]] = None, exclude_dirs_map: Optional[Dict[str, List[str]]] = None, remote_root: str = DEFAULT_REMOTE_ROOT, upload_func=None, allowed_extensions: Optional[Sequence[str]] = None, get_remote_hashes_func=None) -> None:
     # Backend provides upload_func for remote upload
     allowed_set = None
     if allowed_extensions:
@@ -145,7 +145,8 @@ def sync_workspace(paths: List[str], exclude_files_global: Optional[List[str]] =
             per_src_dirs_exclude += exclude_dirs_map.get(src, []) or exclude_dirs_map.get(src_abs, []) or exclude_dirs_map.get(base, [])
         local_hashes = compute_hashes(src_abs, exclude_files=per_src_files_exclude, exclude_dirs=per_src_dirs_exclude)
         remote_target = os.path.join(remote_root, base) if is_dir else os.path.join(remote_root, base)
-        remote_hashes = get_remote_hashes(remote_target)
+        remote_hashes_func = get_remote_hashes_func or get_remote_hashes
+        remote_hashes = remote_hashes_func(remote_target)
         files_to_upload: List[Tuple[str, str]] = []
         for rel, h in local_hashes.items():
             if allowed_set is not None:

@@ -14,9 +14,11 @@
     "run_commands": [
       [
         "apt-get update && apt-get install -y curl ca-certificates gnupg",
-        "curl -fsSL -o /tmp/cuda-keyring.deb https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb",
-        "dpkg -i /tmp/cuda-keyring.deb && rm -f /tmp/cuda-keyring.deb",
-        "apt-get update"
+        "curl -fsSL -o /tmp/nsight-compute_2025.3.0_amd64.deb https://developer.download.nvidia.com/devtools/repos/ubuntu2204/amd64/nsight-compute-2025.3.0_2025.3.0.19-1_amd64.deb",
+        "dpkg -i /tmp/nsight-compute_2025.3.0_amd64.deb || apt-get -f install -y",
+        "rm -f /tmp/nsight-compute_2025.3.0_amd64.deb"
+
+
       ]
     ],
     "apt_packages": [
