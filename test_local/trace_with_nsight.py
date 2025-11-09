@@ -9,8 +9,10 @@ HF_HOME_PATH = os.path.expanduser(os.environ.get("HF_HOME", "~/hf"))
 os.environ["HF_HOME"] = HF_HOME_PATH
 os.environ.setdefault("HUGGINGFACE_HUB_CACHE", HF_HOME_PATH)
 
-REMOTE_OUT = os.environ.get("REMOTE_OUT_DIR", "/workspace/out_local")
-WORKLOAD = os.environ.get("WORKLOAD", "/workspace/commands/sglang_workload.py")
+BASE_DIR = Path(__file__).resolve().parent
+
+REMOTE_OUT = os.environ.get("REMOTE_OUT_DIR", str(BASE_DIR / "out_local"))
+WORKLOAD = os.environ.get("WORKLOAD", str(BASE_DIR / "sglang_workload.py"))
 BASE = os.environ.get("TRACE_BASE", "sglang_vllm_trace")
 DEBUG_DIR = os.environ.get("DEBUG_DIR", f"{REMOTE_OUT}/debug")
 SANITY = os.environ.get("SANITY_BEFORE_PROFILE", "0") == "1"
@@ -166,7 +168,7 @@ if __name__ == "__main__":
         out_base = f"{REMOTE_OUT}/{BASE}"
         rep_ns = f"{out_base}.nsys-rep"
         rep_qd = f"{out_base}.qdrep"
-        if os.path.exists(rep_ns) or os.path.exists(rep_qd):
+        if Path(rep_ns).exists() or Path(rep_qd).exists():
             print("TRACE: NSYS produced a report despite error; continuing")
             nsys_ok = True
         else:
@@ -176,7 +178,7 @@ if __name__ == "__main__":
         out_base = f"{REMOTE_OUT}/{BASE}"
         rep_ns = f"{out_base}.nsys-rep"
         rep_qd = f"{out_base}.qdrep"
-        if os.path.exists(rep_ns) or os.path.exists(rep_qd):
+        if Path(rep_ns).exists() or Path(rep_qd).exists():
             print("TRACE: NSYS produced a report despite error; continuing")
             nsys_ok = True
         else:
@@ -185,5 +187,4 @@ if __name__ == "__main__":
         run_ncu()
     except Exception as exc:
         print(f"TRACE: NCU error: {exc}; continuing")
-
 

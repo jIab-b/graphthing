@@ -20,7 +20,9 @@ HF_HOME_PATH = os.path.expanduser(os.environ.get("HF_HOME", "~/hf"))
 os.environ["HF_HOME"] = HF_HOME_PATH
 os.environ.setdefault("HUGGINGFACE_HUB_CACHE", HF_HOME_PATH)
 
-MODEL_ID = os.environ.get("GRAPH_MODEL_ID", "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B")
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+MODEL_ID = os.environ.get("GRAPH_MODEL_ID", "Qwen/Qwen3-0.6B")
 
 def _simple_causal_mask(config, input_embeds, attention_mask, cache_position, past_key_values, position_ids=None, **_):
     batch_size, q_len = input_embeds.shape[:2]
@@ -120,7 +122,7 @@ def export_decode(model, tok, bsz, cache_len, out_dir):
     _maybe_write_dot(ep, "decode", os.path.join(out_dir, f"decode_B{bsz}_L{cache_len}.dot"))
 
 if __name__ == "__main__":
-    out_dir = os.environ.get("REMOTE_OUT_DIR", "/workspace/out_local")
+    out_dir = os.environ.get("REMOTE_OUT_DIR", os.path.join(BASE_DIR, "out_local"))
     _reset(out_dir)
     os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "max_split_size_mb:128")
     os.environ.setdefault("TRANSFORMERS_VERBOSITY", "debug")
@@ -148,9 +150,8 @@ if __name__ == "__main__":
             print(f"SAFETENSORS: loaded {path} in {dt:.2f}s keys={k}")
             return sd
         st.load_file = _dbg_load_file
-    # Stage model snapshot to a local, non-volume path without symlinks
     repo_id = MODEL_ID
-    local_root = os.environ.get("GRAPH_LOCAL_ROOT", "/tmp/hf_local")
+    local_root = os.environ.get("GRAPH_LOCAL_ROOT", os.path.join(BASE_DIR, "hf_local"))
     model_alias = repo_id.split("/")[-1].replace("/", "--")
     LOCAL_DIR = os.path.join(local_root, model_alias)
     os.makedirs(LOCAL_DIR, exist_ok=True)
@@ -170,8 +171,6 @@ if __name__ == "__main__":
             print(f"STAGE: snapshot_download failed ({exc}), proceeding if files already present")
     else:
         print("STAGE: huggingface_hub not available, assuming files present locally")
-
-    # Offline, local-dir load to avoid remote checks and networked mmaps
     os.environ["HF_HUB_OFFLINE"] = "1"
     os.environ["TRANSFORMERS_OFFLINE"] = "1"
     print("STEP 1: loading tokenizer from local dir")
@@ -200,11 +199,6 @@ if __name__ == "__main__":
         free_b2, total_b2 = torch.cuda.mem_get_info()
         print(f"CUDA: after move free={free_b2} total={total_b2} (move {time.time() - t_mv:.2f}s)")
     print("STEP 5: finalizing attention implementation")
-
-
-
-
-
     print("STEP 6: model ready")
     if hasattr(model, "set_attn_implementation"):
         model.set_attn_implementation("eager")

@@ -1,0 +1,12 @@
+torch==2.7.1
+transformers
+sglang
+vllm
+accelerate
+huggingface_hub
+safetensors
+pydot
+graphviz
+nvtx
+sentencepiece
+

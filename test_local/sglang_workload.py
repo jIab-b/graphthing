@@ -9,7 +9,9 @@ HF_HOME_PATH = os.path.expanduser(os.environ.get("HF_HOME", "~/hf"))
 os.environ["HF_HOME"] = HF_HOME_PATH
 os.environ.setdefault("HUGGINGFACE_HUB_CACHE", HF_HOME_PATH)
 
-MODEL_ID = os.environ.get("GRAPH_MODEL_ID", "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B")
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+MODEL_ID = os.environ.get("GRAPH_MODEL_ID", "Qwen/Qwen3-0.6B")
 
 @sgl.function
 def gen_text(s, text, tokens, temperature):
@@ -39,7 +41,7 @@ def kv_bytes_per_token(cfg, dtype_bytes=2):
     return 2 * layers * nkvh * head_dim * dtype_bytes
 
 if __name__ == "__main__":
-    OUT_DIR = os.environ.get("REMOTE_OUT_DIR", "/workspace/out_local")
+    OUT_DIR = os.environ.get("REMOTE_OUT_DIR", os.path.join(BASE_DIR, "out_local"))
     os.makedirs(OUT_DIR, exist_ok=True)
     runtime = sgl.Runtime(model_path=MODEL_ID)
     sgl.set_default_backend(runtime)
@@ -87,5 +89,4 @@ if __name__ == "__main__":
     with open(os.path.join(OUT_DIR, "run_summary.json"), "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2)
     print(json.dumps(summary))
-
 
