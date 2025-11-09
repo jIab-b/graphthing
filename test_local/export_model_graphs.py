@@ -1,6 +1,9 @@
+import json
 import os
 import time
 import shutil
+from datetime import datetime, timezone
+from pathlib import Path
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig
 from torch.fx.passes.graph_drawer import FxGraphDrawer
@@ -23,6 +26,30 @@ os.environ.setdefault("HUGGINGFACE_HUB_CACHE", HF_HOME_PATH)
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 MODEL_ID = os.environ.get("GRAPH_MODEL_ID", "Qwen/Qwen3-0.6B")
+PREFILL_SCENARIOS = [
+    {"batch_size": 1, "seq_len": 512},
+    {"batch_size": 2, "seq_len": 512},
+    {"batch_size": 1, "seq_len": 1024},
+]
+DECODE_SCENARIOS = [
+    {"batch_size": 1, "cache_len": 256},
+    {"batch_size": 1, "cache_len": 512},
+    {"batch_size": 2, "cache_len": 256},
+]
+RUNTIME_POLICY = {
+    "dynamic_batch_window_ms": 2,
+    "speculative_decode": {"enabled": True, "draft_tokens": 2},
+    "cuda_graph_buckets": {
+        "prefill": [{"batch_size": s["batch_size"], "seq_len": s["seq_len"]} for s in PREFILL_SCENARIOS],
+        "decode": [{"batch_size": s["batch_size"], "cache_len": s["cache_len"]} for s in DECODE_SCENARIOS],
+    },
+    "kv_cache": {
+        "policy": "paged",
+        "page_size_tokens": 256,
+        "eviction": "least_recent",
+    },
+}
+
 
 def _simple_causal_mask(config, input_embeds, attention_mask, cache_position, past_key_values, position_ids=None, **_):
     batch_size, q_len = input_embeds.shape[:2]
@@ -53,6 +80,101 @@ def _reset(path):
     if os.path.isdir(path):
         shutil.rmtree(path)
     os.makedirs(path, exist_ok=True)
+
+def _bytes_per_dtype(dtype: torch.dtype) -> int:
+    return torch.tensor((), dtype=dtype).element_size()
+
+def _kv_bytes_per_token(cfg, dtype: torch.dtype) -> int:
+    nkvh = getattr(cfg, "num_key_value_heads", cfg.num_attention_heads)
+    head_dim = getattr(cfg, "head_dim", cfg.hidden_size // cfg.num_attention_heads)
+    return 2 * cfg.num_hidden_layers * nkvh * head_dim * _bytes_per_dtype(dtype)
+
+def _gpu_snapshot():
+    if not torch.cuda.is_available():
+        return {"available": False}
+    props = torch.cuda.get_device_properties(0)
+    free_b, total_b = torch.cuda.mem_get_info()
+    approx_bw_gbps = None
+    mem_clock = getattr(props, "memory_clock_rate", 0)
+    bus_width = getattr(props, "memory_bus_width", 0)
+    if mem_clock and bus_width:
+        approx_bw_gbps = 2 * mem_clock * 1e3 * (bus_width / 8) / 1e9
+    return {
+        "available": True,
+        "name": props.name,
+        "sm_count": props.multi_processor_count,
+        "compute_capability": f"{props.major}.{props.minor}",
+        "total_memory_bytes": total_b,
+        "free_memory_bytes": free_b,
+        "shared_mem_per_block": props.shared_memory_per_block,
+        "l2_cache_bytes": getattr(props, "l2_cache_size", None),
+        "memory_bandwidth_gbps_est": approx_bw_gbps,
+        "driver": torch.version.cuda,
+    }
+
+def _manifest_header(cfg, model_dtype, out_dir):
+    gpu = _gpu_snapshot()
+    kv_bpt = _kv_bytes_per_token(cfg, model_dtype)
+    return {
+        "model_id": MODEL_ID,
+        "local_snapshot": os.path.abspath(out_dir),
+        "generated_utc": datetime.now(timezone.utc).isoformat(),
+        "model_config": {
+            "layers": getattr(cfg, "num_hidden_layers", None),
+            "attention_heads": getattr(cfg, "num_attention_heads", None),
+            "key_value_heads": getattr(cfg, "num_key_value_heads", None),
+            "head_dim": getattr(cfg, "head_dim", None),
+            "hidden_size": getattr(cfg, "hidden_size", None),
+            "dtype": str(model_dtype),
+        },
+        "hardware": gpu,
+        "kv_cache": {
+            "bytes_per_token": kv_bpt,
+            "dtype": str(model_dtype),
+            "notes": "kv_bytes = 2 * layers * kv_heads * head_dim * dtype_bytes",
+        },
+        "runtime_policy": RUNTIME_POLICY,
+        "precision_options": {
+            "weights": ["fp16"],
+            "activations": ["fp16"],
+            "kv_cache": ["fp16", "int8"],
+        },
+        "quant_calibration": {
+            "status": "not_collected",
+            "notes": "int8 scales to be produced via calibration script before enabling low-precision path",
+        },
+        "profiling": {
+            "nsight_script": os.path.abspath(os.path.join(BASE_DIR, "trace_with_nsight.py")),
+            "instructions": "Activate venv, set WORKLOAD env to serving entrypoint, then run trace_with_nsight.py for NSYS/NCU traces.",
+        },
+        "scenarios": [],
+    }
+
+def _decorate_entry(entry, cfg, model_dtype):
+    kv_bpt = _kv_bytes_per_token(cfg, model_dtype)
+    seq = entry.get("sequence_length") or 0
+    cache_len = entry.get("cache_length") or 0
+    if entry["phase"] == "prefill":
+        produced = kv_bpt * entry["batch_size"] * seq
+        consumed = 0
+    else:
+        produced = kv_bpt * entry["batch_size"]
+        consumed = kv_bpt * entry["batch_size"] * cache_len
+    entry["kv_cache_bytes"] = {
+        "consumed": consumed,
+        "produced": produced,
+    }
+    entry["attention"] = {
+        "implementation": "sdpa_eager",
+        "mask": "causal",
+        "rope_theta": getattr(cfg, "rope_theta", None),
+        "rope_scaling": getattr(cfg, "rope_scaling", None),
+    }
+    entry["runtime_tags"] = {
+        "cuda_graph_bucket": True,
+        "serving_priority": "throughput" if entry["phase"] == "prefill" else "latency",
+    }
+    return entry
 
 def _safe_export(model, args, kwargs):
     try:
@@ -88,15 +210,38 @@ def export_prefill(model, tok, bsz, tok_len, out_dir):
     x = torch.randint(0, tok.vocab_size, (bsz, tok_len), device="cuda", dtype=torch.long)
     m = torch.ones(bsz, tok_len, device="cuda", dtype=torch.long)
     ep = _safe_export(model, (x,), {"attention_mask": m, "use_cache": False, "return_dict": False})
-    p = os.path.join(out_dir, f"prefill_B{bsz}_T{tok_len}.pt2")
+    base_name = f"prefill_B{bsz}_T{tok_len}"
+    p = os.path.join(out_dir, f"{base_name}.pt2")
     torch.export.save(ep, p)
-    _maybe_write_dot(ep, "prefill", os.path.join(out_dir, f"prefill_B{bsz}_T{tok_len}.dot"))
+    dot_path = os.path.join(out_dir, f"{base_name}.dot")
+    _maybe_write_dot(ep, "prefill", dot_path)
+    return {
+        "id": base_name,
+        "phase": "prefill",
+        "batch_size": bsz,
+        "sequence_length": tok_len,
+        "cache_length": None,
+        "artifacts": {
+            "torch_export": os.path.abspath(p),
+            "graphviz": os.path.abspath(dot_path),
+        },
+        "inputs": [
+            {"name": "input_ids", "shape": [bsz, tok_len], "dtype": "torch.long"},
+            {"name": "attention_mask", "shape": [bsz, tok_len], "dtype": "torch.long"},
+        ],
+        "outputs": [
+            {"name": "logits", "shape": [bsz, tok_len, model.config.hidden_size], "dtype": str(model.dtype)},
+        ],
+        "notes": ["prefill path", "no kv cache inputs"],
+    }
 
 def export_decode(model, tok, bsz, cache_len, out_dir):
     cfg = model.config
     nh = cfg.num_attention_heads
     nkvh = getattr(cfg, "num_key_value_heads", nh)
-    hd = cfg.hidden_size // nh
+    hd = getattr(cfg, "head_dim", None)
+    if hd is None:
+        hd = cfg.hidden_size // nh
     x = torch.randint(0, tok.vocab_size, (bsz, 1), device="cuda", dtype=torch.long)
     mask = torch.ones(bsz, cache_len + 1, device="cuda", dtype=torch.long)
     pos = torch.arange(cache_len, cache_len + 1, device="cuda", dtype=torch.long).unsqueeze(0).expand(bsz, 1)
@@ -117,9 +262,32 @@ def export_decode(model, tok, bsz, cache_len, out_dir):
             y = self.m(input_ids, attention_mask=attn_mask, past_key_values=cache, use_cache=True, position_ids=position_ids, return_dict=False)
             return y[0]
     ep = _safe_export(DecodeWrapper(model), (x, mask, pkv, pos), {})
-    p = os.path.join(out_dir, f"decode_B{bsz}_L{cache_len}.pt2")
+    base_name = f"decode_B{bsz}_L{cache_len}"
+    p = os.path.join(out_dir, f"{base_name}.pt2")
     torch.export.save(ep, p)
-    _maybe_write_dot(ep, "decode", os.path.join(out_dir, f"decode_B{bsz}_L{cache_len}.dot"))
+    dot_path = os.path.join(out_dir, f"{base_name}.dot")
+    _maybe_write_dot(ep, "decode", dot_path)
+    return {
+        "id": base_name,
+        "phase": "decode",
+        "batch_size": bsz,
+        "sequence_length": 1,
+        "cache_length": cache_len,
+        "artifacts": {
+            "torch_export": os.path.abspath(p),
+            "graphviz": os.path.abspath(dot_path),
+        },
+        "inputs": [
+            {"name": "input_ids", "shape": [bsz, 1], "dtype": "torch.long"},
+            {"name": "attention_mask", "shape": [bsz, cache_len + 1], "dtype": "torch.long"},
+            {"name": "cached_kv", "shape": [cfg.num_hidden_layers, 2, bsz, nkvh, cache_len, hd], "dtype": str(model.dtype)},
+            {"name": "position_ids", "shape": [bsz, 1], "dtype": "torch.long"},
+        ],
+        "outputs": [
+            {"name": "logits", "shape": [bsz, 1, model.config.hidden_size], "dtype": str(model.dtype)},
+        ],
+        "notes": ["decode path", "kv cache provided explicitly"],
+    }
 
 if __name__ == "__main__":
     out_dir = os.environ.get("REMOTE_OUT_DIR", os.path.join(BASE_DIR, "out_local"))
@@ -211,6 +379,18 @@ if __name__ == "__main__":
         print("VERIFY: forward ok")
     except Exception as exc:
         print(f"VERIFY: forward failed: {exc}")
-    export_prefill(model, tok, 1, 512, out_dir)
-    export_decode(model, tok, 1, 512, out_dir)
-
+    manifest = _manifest_header(cfg, model.dtype, LOCAL_DIR)
+    scenarios = []
+    for sc in PREFILL_SCENARIOS:
+        meta = export_prefill(model, tok, sc["batch_size"], sc["seq_len"], out_dir)
+        meta = _decorate_entry(meta, cfg, model.dtype)
+        scenarios.append(meta)
+    for sc in DECODE_SCENARIOS:
+        meta = export_decode(model, tok, sc["batch_size"], sc["cache_len"], out_dir)
+        meta = _decorate_entry(meta, cfg, model.dtype)
+        scenarios.append(meta)
+    manifest["scenarios"] = scenarios
+    manifest_path = os.path.join(out_dir, "export_manifest.json")
+    with open(manifest_path, "w", encoding="utf-8") as f:
+        json.dump(manifest, f, indent=2)
+    print(f"MANIFEST: wrote metadata -> {manifest_path}")

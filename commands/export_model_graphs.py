@@ -1,9 +1,13 @@
+import json
 import os
-import time
 import shutil
+import subprocess
+import time
+from pathlib import Path
+
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig
 from torch.fx.passes.graph_drawer import FxGraphDrawer
+from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 from transformers import masking_utils as hf_masking_utils
 from transformers.cache_utils import DynamicCache
 from transformers.utils import logging as hf_logging
@@ -19,8 +23,28 @@ except Exception:
 HF_HOME_PATH = os.path.expanduser(os.environ.get("HF_HOME", "~/hf"))
 os.environ["HF_HOME"] = HF_HOME_PATH
 os.environ.setdefault("HUGGINGFACE_HUB_CACHE", HF_HOME_PATH)
+os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "1")
 
 MODEL_ID = os.environ.get("GRAPH_MODEL_ID", "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B")
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    val = os.environ.get(name)
+    if val is None:
+        return default
+    return val.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _parse_device_map(raw: str | None):
+    if not raw:
+        return None
+    txt = raw.strip()
+    if txt.lower() == "auto":
+        return "auto"
+    try:
+        return json.loads(txt)
+    except json.JSONDecodeError:
+        return txt
 
 def _simple_causal_mask(config, input_embeds, attention_mask, cache_position, past_key_values, position_ids=None, **_):
     batch_size, q_len = input_embeds.shape[:2]
@@ -81,6 +105,85 @@ def _maybe_write_dot(ep, label, path):
         txt = dg.create_dot()
     with open(path, "w", encoding="utf-8") as f:
         f.write(txt)
+
+
+def _snapshot_has_weights(local_dir: str) -> bool:
+    return any(Path(local_dir).glob("*.safetensors"))
+
+
+def _try_hf_cli_download(repo_id: str, local_dir: str) -> bool:
+    hf_cli = shutil.which("huggingface-cli")
+    if hf_cli is None:
+        return False
+    cmd = [
+        hf_cli,
+        "download",
+        repo_id,
+        "--local-dir",
+        local_dir,
+        "--local-dir-use-symlinks",
+        "False",
+        "--resume-download",
+    ]
+    include_patterns = [
+        "*.safetensors",
+        "*.json",
+        "tokenizer*",
+        "config.json",
+        "generation_config.json",
+    ]
+    for pat in include_patterns:
+        cmd.extend(["--include", pat])
+    env = os.environ.copy()
+    env.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "1")
+    print(f"STAGE: huggingface-cli download -> {local_dir}")
+    try:
+        subprocess.run(cmd, check=True, env=env)
+        return True
+    except Exception as exc:
+        print(f"STAGE: huggingface-cli failed ({exc}); will fall back")
+        return False
+
+
+def _ensure_local_snapshot(repo_id: str, local_root: str) -> str:
+    model_alias = repo_id.split("/")[-1].replace("/", "--")
+    local_dir = os.path.join(local_root, model_alias)
+    force_refresh = _env_flag("GRAPH_FORCE_SNAPSHOT_REFRESH", False)
+    os.makedirs(local_dir, exist_ok=True)
+    if force_refresh:
+        print(f"STAGE: forcing refresh of snapshot at {local_dir}")
+        shutil.rmtree(local_dir, ignore_errors=True)
+        os.makedirs(local_dir, exist_ok=True)
+
+    if _snapshot_has_weights(local_dir):
+        print(f"STAGE: detected existing snapshot at {local_dir}, reusing")
+        return local_dir
+
+    prefer_cli = _env_flag("GRAPH_USE_HF_CLI_DOWNLOAD", True)
+    if prefer_cli and _try_hf_cli_download(repo_id, local_dir) and _snapshot_has_weights(local_dir):
+        print("STAGE: snapshot ready via huggingface-cli")
+        return local_dir
+
+    if snapshot_download is not None:
+        print(f"STAGE: snapshot_download fallback for {repo_id}")
+        try:
+            dl_t0 = time.time()
+            snapshot_download(
+                repo_id=repo_id,
+                local_dir=local_dir,
+                local_dir_use_symlinks=False,
+                allow_patterns=["*.safetensors", "*.json", "tokenizer*", "config.json", "generation_config.json"],
+                ignore_patterns=["*.bin"],
+            )
+            print(f"STAGE: snapshot ready in {time.time() - dl_t0:.2f}s via python client")
+        except Exception as exc:
+            print(f"STAGE: snapshot_download failed ({exc}); continuing if files already exist")
+    else:
+        print("STAGE: huggingface_hub snapshot_download unavailable; assuming files exist locally")
+
+    if not _snapshot_has_weights(local_dir):
+        raise RuntimeError(f"Snapshot for {repo_id} missing in {local_dir}; download failed")
+    return local_dir
 
 def export_prefill(model, tok, bsz, tok_len, out_dir):
     x = torch.randint(0, tok.vocab_size, (bsz, tok_len), device="cuda", dtype=torch.long)
@@ -151,25 +254,7 @@ if __name__ == "__main__":
     # Stage model snapshot to a local, non-volume path without symlinks
     repo_id = MODEL_ID
     local_root = os.environ.get("GRAPH_LOCAL_ROOT", "/tmp/hf_local")
-    model_alias = repo_id.split("/")[-1].replace("/", "--")
-    LOCAL_DIR = os.path.join(local_root, model_alias)
-    os.makedirs(LOCAL_DIR, exist_ok=True)
-    print(f"STAGE: ensuring local snapshot at {LOCAL_DIR}")
-    if snapshot_download is not None:
-        try:
-            dl_t0 = time.time()
-            snapshot_download(
-                repo_id=repo_id,
-                local_dir=LOCAL_DIR,
-                local_dir_use_symlinks=False,
-                allow_patterns=["*.safetensors", "*.json", "tokenizer*", "config.json", "generation_config.json"],
-                ignore_patterns=["*.bin"],
-            )
-            print(f"STAGE: snapshot ready in {time.time() - dl_t0:.2f}s")
-        except Exception as exc:
-            print(f"STAGE: snapshot_download failed ({exc}), proceeding if files already present")
-    else:
-        print("STAGE: huggingface_hub not available, assuming files present locally")
+    LOCAL_DIR = _ensure_local_snapshot(repo_id, local_root)
 
     # Offline, local-dir load to avoid remote checks and networked mmaps
     os.environ["HF_HUB_OFFLINE"] = "1"
@@ -181,24 +266,29 @@ if __name__ == "__main__":
     print(f"CONFIG: loaded; layers={getattr(cfg,'num_hidden_layers',None)} heads={getattr(cfg,'num_attention_heads',None)} hidden={getattr(cfg,'hidden_size',None)}")
     print("STEP 3: loading model weights on CPU from local dir (single GPU move after)")
     t_load = time.time()
+    device_map = _parse_device_map(os.environ.get("GRAPH_DEVICE_MAP"))
+    low_cpu_mem = _env_flag("GRAPH_LOW_CPU_MEM_USAGE", True)
     model = AutoModelForCausalLM.from_pretrained(
         LOCAL_DIR,
         torch_dtype="auto",
-        low_cpu_mem_usage=False,
+        low_cpu_mem_usage=low_cpu_mem,
         trust_remote_code=True,
         attn_implementation="sdpa",
+        device_map=device_map,
     )
     print(f"LOAD: from_pretrained completed in {time.time() - t_load:.2f}s (CPU)")
-    if torch.cuda.is_available():
+    should_move_to_cuda = device_map is None and torch.cuda.is_available()
+    if should_move_to_cuda:
         free_b, total_b = torch.cuda.mem_get_info()
         print(f"CUDA: before move free={free_b} total={total_b}")
-    print("STEP 4: moving model to CUDA (single bulk transfer)")
-    t_mv = time.time()
-    model.to("cuda", non_blocking=True)
-    if torch.cuda.is_available():
+        print("STEP 4: moving model to CUDA (single bulk transfer)")
+        t_mv = time.time()
+        model.to("cuda", non_blocking=True)
         torch.cuda.synchronize()
         free_b2, total_b2 = torch.cuda.mem_get_info()
         print(f"CUDA: after move free={free_b2} total={total_b2} (move {time.time() - t_mv:.2f}s)")
+    elif device_map is not None:
+        print(f"STEP 4: device_map={device_map} handled placement; skipping manual cuda move")
     print("STEP 5: finalizing attention implementation")
 
 
@@ -219,4 +309,3 @@ if __name__ == "__main__":
         print(f"VERIFY: forward failed: {exc}")
     export_prefill(model, tok, 1, 512, out_dir)
     export_decode(model, tok, 1, 512, out_dir)
-
