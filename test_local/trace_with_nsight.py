@@ -12,7 +12,7 @@ os.environ.setdefault("HUGGINGFACE_HUB_CACHE", HF_HOME_PATH)
 BASE_DIR = Path(__file__).resolve().parent
 
 REMOTE_OUT = os.environ.get("REMOTE_OUT_DIR", str(BASE_DIR / "out_local"))
-WORKLOAD = os.environ.get("WORKLOAD", str(BASE_DIR / "sglang_workload.py"))
+WORKLOAD = os.environ.get("WORKLOAD", str(BASE_DIR / "reconstruct_infer.py"))
 BASE = os.environ.get("TRACE_BASE", "sglang_vllm_trace")
 DEBUG_DIR = os.environ.get("DEBUG_DIR", f"{REMOTE_OUT}/debug")
 SANITY = os.environ.get("SANITY_BEFORE_PROFILE", "0") == "1"
@@ -187,4 +187,3 @@ if __name__ == "__main__":
         run_ncu()
     except Exception as exc:
         print(f"TRACE: NCU error: {exc}; continuing")
-

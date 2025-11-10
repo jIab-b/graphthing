@@ -13,6 +13,8 @@ from torch.fx.passes.graph_drawer import FxGraphDrawer
 from transformers import masking_utils as hf_masking_utils
 from transformers.cache_utils import DynamicCache
 from transformers.utils import logging as hf_logging
+
+from kv_utils import flatten_kv, unflatten_kv
 try:
     from huggingface_hub import snapshot_download
 except Exception:
@@ -31,13 +33,13 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_ID = os.environ.get("GRAPH_MODEL_ID", "Qwen/Qwen3-0.6B")
 PREFILL_SCENARIOS = [
     {"batch_size": 1, "seq_len": 512},
-    {"batch_size": 2, "seq_len": 512},
     {"batch_size": 1, "seq_len": 1024},
+    {"batch_size": 2, "seq_len": 512},
 ]
 DECODE_SCENARIOS = [
-    {"batch_size": 1, "cache_len": 256},
     {"batch_size": 1, "cache_len": 512},
-    {"batch_size": 2, "cache_len": 256},
+    {"batch_size": 1, "cache_len": 1024},
+    {"batch_size": 2, "cache_len": 512},
 ]
 RUNTIME_POLICY = {
     "dynamic_batch_window_ms": 2,
@@ -226,7 +228,7 @@ def _benchmark_callable(run_fn, device: str, warmup: int = 2, iters: int = 5) ->
 def _measure_prefill(model, scenario_meta, x, attn_mask, kv_bpt, device):
     def _run():
         with torch.inference_mode():
-            model(x, attention_mask=attn_mask, use_cache=False, return_dict=False)
+            model(x, attention_mask=attn_mask, use_cache=True, return_dict=False)
     stats = _benchmark_callable(_run, device)
     produced = kv_bpt * scenario_meta["batch_size"] * scenario_meta["sequence_length"]
     stats.update(
@@ -280,6 +282,10 @@ def _build_full_inference_plan(prefill_entries, decode_entries, out_dir):
     for pf in prefill_entries:
         matches = decode_by_batch.get(pf["batch_size"], [])
         for dec in matches:
+            if dec.get("cache_length") is None or pf.get("sequence_length") is None:
+                continue
+            if dec["cache_length"] > pf["sequence_length"]:
+                continue
             kv_info = pf.get("external_state", {}).get("kv_cache", {})
             bundles.append(
                 {
@@ -496,7 +502,22 @@ def export_prefill(model, tok, bsz, tok_len, out_dir, device: str):
     kv_bpt = _kv_bytes_per_token(cfg, model.dtype)
     x = torch.randint(0, tok.vocab_size, (bsz, tok_len), device=device, dtype=torch.long)
     m = torch.ones(bsz, tok_len, device=device, dtype=torch.long)
-    ep = _safe_export(model, (x,), {"attention_mask": m, "use_cache": False, "return_dict": False})
+
+    class PrefillWrapper(torch.nn.Module):
+        def __init__(self, m):
+            super().__init__()
+            self.m = m
+
+        def forward(self, input_ids, attention_mask):
+            logits, past = self.m(
+                input_ids,
+                attention_mask=attention_mask,
+                use_cache=True,
+                return_dict=False,
+            )
+            return logits, flatten_kv(past)
+
+    ep = _safe_export(PrefillWrapper(model), (x, m), {})
     base_name = f"prefill_B{bsz}_T{tok_len}"
     p = os.path.join(out_dir, f"{base_name}.pt2")
     torch.export.save(ep, p)
@@ -525,9 +546,15 @@ def export_prefill(model, tok, bsz, tok_len, out_dir, device: str):
         ],
         "outputs": [
             {"name": "logits", "shape": [bsz, tok_len, model.config.hidden_size], "dtype": str(model.dtype)},
+            {
+                "name": "kv_cache_flat",
+                "components": cfg.num_hidden_layers * 2,
+                "dtype": str(model.dtype),
+                "notes": "flattened tuple (k0, v0, ...) each shaped [batch, heads, seq, head_dim]",
+            },
         ],
         "measurements": metrics,
-        "notes": ["prefill path", "no kv cache inputs"],
+        "notes": ["prefill path", "outputs logits plus flattened KV cache"],
     }
 
 def export_decode(model, tok, bsz, cache_len, out_dir, device: str):
@@ -541,12 +568,12 @@ def export_decode(model, tok, bsz, cache_len, out_dir, device: str):
     x = torch.randint(0, tok.vocab_size, (bsz, 1), device=device, dtype=torch.long)
     mask = torch.ones(bsz, cache_len + 1, device=device, dtype=torch.long)
     pos = torch.arange(cache_len, cache_len + 1, device=device, dtype=torch.long).unsqueeze(0).expand(bsz, 1)
-    pkv = []
+    pkv_layers = []
     for _ in range(cfg.num_hidden_layers):
         k = torch.randn(bsz, nkvh, cache_len, hd, device=device, dtype=model.dtype)
         v = torch.randn(bsz, nkvh, cache_len, hd, device=device, dtype=model.dtype)
-        pkv.append((k, v))
-    pkv = tuple(pkv)
+        pkv_layers.append((k, v))
+    pkv = flatten_kv(tuple(pkv_layers))
 
     class DecodeWrapper(torch.nn.Module):
         def __init__(self, m):
@@ -554,18 +581,20 @@ def export_decode(model, tok, bsz, cache_len, out_dir, device: str):
             self.m = m
 
         def forward(self, input_ids, attn_mask, cached_kv, position_ids):
-            cache = DynamicCache(config=self.m.config)
-            for li, (lk, lv) in enumerate(cached_kv):
-                cache.update(lk, lv, li)
+            legacy = unflatten_kv(cached_kv, self.m.config.num_hidden_layers)
+            dyn_cache = DynamicCache.from_legacy_cache(tuple(legacy))
             y = self.m(
                 input_ids,
                 attention_mask=attn_mask,
-                past_key_values=cache,
+                past_key_values=dyn_cache,
                 use_cache=True,
                 position_ids=position_ids,
                 return_dict=False,
             )
-            return y[0]
+            logits, past = y
+            if isinstance(past, DynamicCache):
+                past = past.to_legacy_cache()
+            return logits, flatten_kv(past)
 
     decode_module = DecodeWrapper(model)
     ep = _safe_export(decode_module, (x, mask, pkv, pos), {})
@@ -599,14 +628,24 @@ def export_decode(model, tok, bsz, cache_len, out_dir, device: str):
         "inputs": [
             {"name": "input_ids", "shape": [bsz, 1], "dtype": "torch.long"},
             {"name": "attention_mask", "shape": [bsz, cache_len + 1], "dtype": "torch.long"},
-            {"name": "cached_kv", "shape": [cfg.num_hidden_layers, 2, bsz, nkvh, cache_len, hd], "dtype": str(model.dtype)},
+            {
+                "name": "cached_kv",
+                "shape": [cfg.num_hidden_layers * 2, bsz, nkvh, cache_len, hd],
+                "dtype": str(model.dtype),
+            },
             {"name": "position_ids", "shape": [bsz, 1], "dtype": "torch.long"},
         ],
         "outputs": [
             {"name": "logits", "shape": [bsz, 1, model.config.hidden_size], "dtype": str(model.dtype)},
+            {
+                "name": "kv_cache_flat",
+                "components": cfg.num_hidden_layers * 2,
+                "dtype": str(model.dtype),
+                "notes": "flattened tuple after appending one decode token",
+            },
         ],
         "measurements": metrics,
-        "notes": ["decode path", "kv cache provided explicitly"],
+        "notes": ["decode path", "kv cache provided + updated as flattened tuple"],
     }
 
 if __name__ == "__main__":
